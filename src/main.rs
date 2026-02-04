@@ -83,66 +83,159 @@ impl VideoQuality {
 // This trait tells eframe how to draw and update our app
 impl eframe::App for YouTubeDownloader {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Create a central panel (the main window area)
+        // Set dark mode (optional)
+        ctx.set_visuals(egui::Visuals::dark());
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("YouTube Video Downloader");
-            ui.add_space(10.0);
+            // Add some padding
+            ui.add_space(20.0);
 
-            // Text input for URL
-            ui.label("YouTube URL:");
-            ui.text_edit_singleline(&mut self.url);
-            ui.add_space(10.0);
-
-            // Buttons for quality selections
-            ui.label("Select Quality");
-            ui.horizontal(|ui| {
-                ui.radio_value(
-                    &mut self.selected_quality,
-                    VideoQuality::Best,
-                    "Best Quality",
+            // Title with custom styling
+            ui.vertical_centered(|ui| {
+                ui.heading(
+                    egui::RichText::new("🎬 YouTube Downloader")
+                        .size(28.0)
+                        .strong(),
                 );
-                ui.radio_value(&mut self.selected_quality, VideoQuality::High1080p, "1080p");
-                ui.radio_value(&mut self.selected_quality, VideoQuality::Medium720p, "720p");
-                ui.radio_value(&mut self.selected_quality, VideoQuality::Low480p, "480p");
-                ui.radio_value(
-                    &mut self.selected_quality,
-                    VideoQuality::AudioOnly,
-                    "Audio Only",
+                ui.add_space(5.0);
+                ui.label(
+                    egui::RichText::new("Download your favorite videos")
+                        .size(14.0)
+                        .color(egui::Color32::GRAY),
                 );
             });
-            ui.add_space(10.0);
 
-            // Get download progress
-            // let status = self.status.lock().unwrap().clone();
-            // let is_downloading = *self.is_downloading.lock().unwrap();
-            let progress = *self.progress.lock().unwrap();
+            ui.add_space(25.0);
 
-            // Get current status (we need to lock the Mutex to read it)
+            // URL Input Card
+            egui::Frame::none()
+                .fill(egui::Color32::from_rgb(40, 40, 45))
+                .rounding(10.0)
+                .inner_margin(15.0)
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("Video URL")
+                            .size(13.0)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+                    ui.add_space(5.0);
+
+                    let text_edit = egui::TextEdit::singleline(&mut self.url)
+                        .hint_text("https://www.youtube.com/watch?v=...")
+                        .desired_width(f32::INFINITY);
+                    ui.add(text_edit);
+                });
+
+            ui.add_space(20.0);
+
+            // Quality Selection Card
+            egui::Frame::none()
+                .fill(egui::Color32::from_rgb(40, 40, 45))
+                .rounding(10.0)
+                .inner_margin(15.0)
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("Quality")
+                            .size(13.0)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+                    ui.add_space(8.0);
+
+                    ui.horizontal_wrapped(|ui| {
+                        let qualities = [
+                            (VideoQuality::Best, "🏆 Best", "Highest available quality"),
+                            (VideoQuality::High1080p, "📺 1080p", "Full HD"),
+                            (VideoQuality::Medium720p, "📹 720p", "HD"),
+                            (VideoQuality::Low480p, "📱 480p", "SD"),
+                            (VideoQuality::AudioOnly, "🎵 Audio", "MP3 only"),
+                        ];
+
+                        for (quality, label, description) in qualities {
+                            let is_selected = self.selected_quality == quality;
+                            let button = egui::Button::new(label)
+                                .fill(if is_selected {
+                                    egui::Color32::from_rgb(70, 130, 180)
+                                } else {
+                                    egui::Color32::from_rgb(50, 50, 55)
+                                })
+                                .rounding(5.0)
+                                .min_size(egui::vec2(80.0, 35.0));
+
+                            if ui.add(button).on_hover_text(description).clicked() {
+                                self.selected_quality = quality;
+                            }
+                        }
+                    });
+                });
+
+            ui.add_space(20.0);
+
+            // Download Button
             let status = self.status.lock().unwrap().clone();
             let is_downloading = *self.is_downloading.lock().unwrap();
+            let progress = *self.progress.lock().unwrap();
 
-            // Download button - disabled while downloading
-            if ui
-                .add_enabled(!is_downloading, egui::Button::new("Download"))
-                .clicked()
-            {
-                self.start_download();
-            }
+            ui.vertical_centered(|ui| {
+                let button_text = if is_downloading {
+                    "⏳ Downloading..."
+                } else {
+                    "⬇ Download"
+                };
+                let button = egui::Button::new(egui::RichText::new(button_text).size(16.0))
+                    .fill(if is_downloading {
+                        egui::Color32::from_rgb(100, 100, 100)
+                    } else {
+                        egui::Color32::from_rgb(34, 139, 34)
+                    })
+                    .rounding(8.0)
+                    .min_size(egui::vec2(200.0, 45.0));
 
-            ui.add_space(10.0);
+                if ui.add_enabled(!is_downloading, button).clicked() {
+                    self.start_download();
+                }
+            });
 
-            // Progress bar
+            ui.add_space(15.0);
+
+            // Progress Bar
             if is_downloading {
-                ui.add(
-                    egui::ProgressBar::new(progress / 100.0)
-                        .show_percentage()
-                        .text(format!("{:.1}%", progress)),
-                );
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(40, 40, 45))
+                    .rounding(10.0)
+                    .inner_margin(15.0)
+                    .show(ui, |ui| {
+                        let progress_text = if progress >= 99.0 && progress < 100.0 {
+                            "🔄 Merging audio and video...".to_string()
+                        } else {
+                            format!("📥 Downloading... {:.1}%", progress)
+                        };
+
+                        ui.label(egui::RichText::new(&progress_text).size(13.0));
+                        ui.add_space(5.0);
+
+                        let progress_bar = egui::ProgressBar::new(progress / 100.0)
+                            .fill(egui::Color32::from_rgb(70, 130, 180))
+                            .rounding(5.0)
+                            .animate(true);
+                        ui.add(progress_bar);
+                    });
             }
 
-            ui.add_space(5.0);
-            ui.label(format!("Status: {}", status));
+            // Status Message
+            ui.add_space(10.0);
+            ui.vertical_centered(|ui| {
+                let status_color = if status.contains("complete") {
+                    egui::Color32::from_rgb(34, 139, 34)
+                } else if status.contains("failed") {
+                    egui::Color32::from_rgb(220, 20, 60)
+                } else {
+                    egui::Color32::GRAY
+                };
+
+                ui.label(egui::RichText::new(&status).size(12.0).color(status_color));
+            });
         });
+
         if *self.is_downloading.lock().unwrap() {
             ctx.request_repaint();
         }
@@ -343,7 +436,9 @@ fn parse_progress(line: &str) -> Option<f32> {
 // Entry point of the program
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([400.0, 200.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([400.0, 500.0])
+            .with_resizable(true),
         ..Default::default()
     };
 
