@@ -30,6 +30,15 @@ const YTDLP_BYTES: &[u8] = include_bytes!("../yt-dlp.exe");
 const DENO_BYTES: &[u8] = include_bytes!("../deno.exe");
 const FFMPEG_BYTES: &[u8] = include_bytes!("../ffmpeg.exe");
 
+// Embed FFmpeg DLLs - adjust version numbers to match your files
+/* const AVCODEC_DLL: &[u8] = include_bytes!("../avcodec-62.dll");
+const AVDEVICE_DLL: &[u8] = include_bytes!("../avdevice-62.dll");
+const AVFILTER_DLL: &[u8] = include_bytes!("../avfilter-11.dll");
+const AVFORMAT_DLL: &[u8] = include_bytes!("../avformat-62.dll");
+const AVUTIL_DLL: &[u8] = include_bytes!("../avutil-60.dll");
+const SWRESAMPLE_DLL: &[u8] = include_bytes!("../swresample-6.dll");
+const SWSCALE_DLL: &[u8] = include_bytes!("../swscale-9.dll"); */
+
 // Default implementation - sets initial values
 impl Default for YouTubeDownloader {
     fn default() -> Self {
@@ -154,67 +163,70 @@ impl YouTubeDownloader {
         let progress = Arc::clone(&self.progress);
         let quality = self.selected_quality.clone();
 
-        // Reset progress
         *progress.lock().unwrap() = 0.0;
-
         *is_downloading.lock().unwrap() = true;
         *status.lock().unwrap() = "Starting download...".to_string();
 
         thread::spawn(move || {
             *status.lock().unwrap() = "Preparing...".to_string();
 
-            // Extract yt-dlp to a temporary location
             let temp_dir = std::env::temp_dir();
             let ytdlp_path = temp_dir.join("yt-dlp.exe");
             let deno_path = temp_dir.join("deno.exe");
             let ffmpeg_path = temp_dir.join("ffmpeg.exe");
 
+            // Helper to extract files
+            let extract_file =
+                |path: &std::path::Path, bytes: &[u8], name: &str| -> Result<(), String> {
+                    if !path.exists() {
+                        std::fs::write(path, bytes)
+                            .map_err(|e| format!("Failed to extract {}: {}", name, e))?;
+                    }
+                    Ok(())
+                };
+
             // Extract yt-dlp
-            if !ytdlp_path.exists() {
-                if let Err(e) = std::fs::write(&ytdlp_path, YTDLP_BYTES) {
-                    *status.lock().unwrap() = format!("Failed to extract yt-dlp: {}", e);
-                    *is_downloading.lock().unwrap() = false;
-                    return;
-                }
+            if let Err(e) = extract_file(&ytdlp_path, YTDLP_BYTES, "yt-dlp") {
+                *status.lock().unwrap() = e;
+                *is_downloading.lock().unwrap() = false;
+                return;
             }
 
-            // Do same for Deno
-            if !deno_path.exists() {
-                if let Err(e) = std::fs::write(&deno_path, DENO_BYTES) {
-                    *status.lock().unwrap() = format!("Failed to extract deno: {}", e);
-                    *is_downloading.lock().unwrap() = false;
-                    return;
-                }
+            // Extract Deno
+            if let Err(e) = extract_file(&deno_path, DENO_BYTES, "deno") {
+                *status.lock().unwrap() = e;
+                *is_downloading.lock().unwrap() = false;
+                return;
             }
 
-            // Do same for FFMPEG
-            if !ffmpeg_path.exists() {
-                if let Err(e) = std::fs::write(&ffmpeg_path, FFMPEG_BYTES) {
-                    *status.lock().unwrap() = format!("Failed to extract deno: {}", e);
-                    *is_downloading.lock().unwrap() = false;
-                    return;
-                }
+            // Extract FFmpeg
+            if let Err(e) = extract_file(&ffmpeg_path, FFMPEG_BYTES, "ffmpeg") {
+                *status.lock().unwrap() = e;
+                *is_downloading.lock().unwrap() = false;
+                return;
             }
 
             *status.lock().unwrap() = "Downloading...".to_string();
 
-            // yrdlp commad center
-            // Spawn process with stdout piped to us
+            // Spawn the command
             let mut child = match Command::new(&ytdlp_path)
                 .arg(&url)
                 .arg("-f")
-                .arg(quality.format_to_ytdlp()) // Use selected quality
+                .arg(quality.format_to_ytdlp())
                 .arg("-o")
                 .arg("%(title)s.%(ext)s")
+                .arg("--merge-output-format")
+                .arg("mp4") // Force MP4 output
+                .arg("--remux-video")
+                .arg("mp4") // Remux to MP4 if needed
                 .arg("--js-runtimes")
                 .arg(format!("deno:{}", deno_path.display()))
                 .arg("--ffmpeg-location")
                 .arg(&ffmpeg_path)
-                .arg("--newline") // Force progress on new lines
-                .arg("--progress")
-                .arg("--verbose")
-                .stdout(Stdio::piped()) // Capture stdout
-                .stderr(Stdio::piped()) // Capture stderr
+                .arg("--newline")
+                .arg("--no-warnings") // Reduce noise in output
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .spawn()
             {
                 Ok(child) => child,
@@ -225,30 +237,71 @@ impl YouTubeDownloader {
                 }
             };
 
-            // Get stdout handle and wrap in BufReader for line-by-line reading
-            let stdout = child.stdout.take().unwrap();
-            let reader = BufReader::new(stdout);
+            // Clone for the stderr thread
+            let status_clone = Arc::clone(&status);
+            let progress_clone = Arc::clone(&progress);
 
-            // Read output line by line
-            for line in reader.lines() {
+            // Read stdout in main thread
+            let stdout = child.stdout.take().unwrap();
+            let stdout_handle = thread::spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    if let Ok(line) = line {
+                        // Update progress
+                        if let Some(percent) = parse_progress(&line) {
+                            *progress_clone.lock().unwrap() = percent;
+                        }
+
+                        // Check for merge/conversion status
+                        if line.contains("[Merger]") {
+                            *status_clone.lock().unwrap() =
+                                "Merging audio and video...".to_string();
+                        } else if line.contains("[ExtractAudio]") {
+                            *status_clone.lock().unwrap() = "Extracting audio...".to_string();
+                        } else if line.contains("[ffmpeg]") && line.contains("Merging") {
+                            *status_clone.lock().unwrap() = "Merging streams...".to_string();
+                        } else if line.contains("[ffmpeg]") && line.contains("Converting") {
+                            *status_clone.lock().unwrap() = "Converting to MP4...".to_string();
+                        }
+                    }
+                }
+            });
+
+            // Read stderr in separate thread (to catch any errors)
+            let stderr = child.stderr.take().unwrap();
+            let mut has_error = false;
+            let mut error_message = String::new();
+
+            let stderr_reader = BufReader::new(stderr);
+            for line in stderr_reader.lines() {
                 if let Ok(line) = line {
-                    // Parse progress from yt-dlp output
-                    if let Some(percent) = parse_progress(&line) {
-                        *progress.lock().unwrap() = percent;
+                    // Only capture actual errors, not warnings
+                    if line.contains("ERROR") {
+                        has_error = true;
+                        error_message = line.clone();
                     }
                 }
             }
 
+            // Wait for stdout thread to finish
+            let _ = stdout_handle.join();
+
+            // Wait for process to complete
             match child.wait() {
-                Ok(status_code) => {
-                    if status_code.success() {
+                Ok(exit_status) => {
+                    if exit_status.success() {
                         *status.lock().unwrap() = "Download complete!".to_string();
+                        *progress.lock().unwrap() = 100.0;
+                    } else if has_error {
+                        *status.lock().unwrap() = format!("Download failed: {}", error_message);
                     } else {
-                        *status.lock().unwrap() = "Download failed".to_string();
+                        // Exit code was non-zero but we didn't catch an error
+                        *status.lock().unwrap() = "Download completed with warnings".to_string();
+                        *progress.lock().unwrap() = 100.0;
                     }
                 }
                 Err(e) => {
-                    *status.lock().unwrap() = format!("Failed to run yt-dlp: {}", e);
+                    *status.lock().unwrap() = format!("Process error: {}", e);
                 }
             }
 
@@ -259,6 +312,16 @@ impl YouTubeDownloader {
 
 fn parse_progress(line: &str) -> Option<f32> {
     // yt-dlp outputs progress like: "[download]  45.2% of 123.45MiB at 1.23MiB/s ETA 00:15"
+
+    // Check for merging status
+    if line.contains("[Merger]") || line.contains("Merging formats into") {
+        return Some(99.0);
+    }
+
+    // Check for ffmpeg processing
+    if line.contains("[ffmpeg]") {
+        return Some(99.5);
+    }
 
     if line.contains("[download]") && line.contains("%") {
         // Find the percentage value
